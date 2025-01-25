@@ -1,11 +1,8 @@
-import parser from "@babel/parser";
-import { ArrayExpression, ExpressionStatement, StringLiteral } from "@babel/types";
-import cheerio from "cheerio";
 import { parseRawDateTime, parseRawHistory, parseRawTime } from "./parsing";
 
 export interface HistoryElement {
   time: Date;
-  images: Record<string, number>;
+  images: Record<string, number | null>;
 }
 
 class HTTPError extends Error {
@@ -15,64 +12,65 @@ class HTTPError extends Error {
 }
 
 async function getTeamInfo(team: string) {
-  const url = new URL("http://scoreboard.uscyberpatriot.org/team.php");
-  url.searchParams.set("team", team);
+  const teamInfoUrl = new URL("https://scoreboard.uscyberpatriot.org/api/image/scores.php"); // Replace with the actual API endpoint
+  teamInfoUrl.searchParams.set("team", team);
 
-  const res = await fetch(url.toString());
+  const historyUrl = new URL("https://scoreboard.uscyberpatriot.org/api/image/chart.php"); // Replace with the actual history API endpoint
+  historyUrl.searchParams.set("team", team);
 
-  if (!res.ok) {
-    throw new HTTPError(503, "Could not reach CyberPatriot scoreboard");
+  const [teamInfoRes, historyRes] = await Promise.all([
+    fetch(teamInfoUrl.toString()),
+    fetch(historyUrl.toString()),
+  ]);
+
+  if (!teamInfoRes.ok) {
+    throw new HTTPError(teamInfoRes.status, "Could not reach the team API");
   }
 
-  const html = await res.text();
-  const $ = cheerio.load(html);
+  if (!historyRes.ok) {
+    throw new HTTPError(historyRes.status, "Could not reach the history API");
+  }
 
-  const table = $("body > div:nth-child(2) > div > table:nth-child(8)");
+  const { data: teamData } = await teamInfoRes.json() as any;
+  const { cols, rows } = await historyRes.json() as any;
 
-  if (!table) {
+  if (!teamData || !teamData.length) {
     throw new HTTPError(404, "Team not found");
   }
 
-  const rows = table.find("tr").toArray().slice(1);
-
-  const images = rows.map((row) => ({
-    name: $(row).find("td:nth-child(1)").text(),
-    runtime: parseRawTime($(row).find("td:nth-child(2)").text()),
+  const images = teamData.map((item: any) => ({
+    name: item.image,
+    runtime: item.duration,
     issues: {
-      found: parseInt($(row).find("td:nth-child(3)").text()),
-      remaining: parseInt($(row).find("td:nth-child(4)").text()),
+      found: item.found,
+      remaining: item.remaining,
     },
-    penalties: parseInt($(row).find("td:nth-child(5)").text()),
-    score: parseInt($(row).find("td:nth-child(6)").text()),
-    multiple: $(row).find("td:nth-child(7)").text().toUpperCase().includes("M"),
-    overtime: $(row).find("td:nth-child(7)").text().toUpperCase().includes("T"),
+    penalties: item.penalties,
+    score: item.ccs_score,
+    multiple: false, // Adjust based on additional API fields if needed
+    overtime: false, // Adjust based on additional API fields if needed
   }));
 
-  const script = $("body > div:nth-child(2) > div > script").text();
+  const ranking = {national: 1, state: 1};
+  const location = teamData[0].location;
+  const division = teamData[0].division;
+  const tier = teamData[0].tier;
+  const runtime = teamData[0].duration;
 
-  const regex = /arrayToDataTable\(((?:.|\s)+?)\)/g;
+  const history: HistoryElement[] = rows.map((row: any) => {
+    const time = row.c[0].v.split(" ")[1]; // Parse the time string
+    const images: Record<string, number | null> = {};
 
-  const matches = regex.exec(script);
+    cols.slice(1).forEach((col: any, index: number) => {
+      images[col.label] = row.c[index + 1]?.v ?? null;
+    });
 
-  let history: HistoryElement[] = [];
+    return { time, images };
+  });
 
-  try {
-    if (matches) {
-      const parsed = parser.parse(matches[1]);
+  const updated = new Date(); // Adjust if API provides an update timestamp
 
-      const arrays = (parsed.program.body[0] as ExpressionStatement).expression as ArrayExpression;
-
-      const data = arrays.elements.map((array) =>
-        (array as ArrayExpression).elements.map((element) => (element as StringLiteral).value),
-      );
-
-      history = parseRawHistory(data);
-    }
-  } catch {}
-
-  const updated = parseRawDateTime($("body > div:nth-child(2) > div > h2:nth-child(3)").text().substring(14, 33));
-
-  return { images, history, updated };
+  return { images, ranking, history, updated, location, division, tier, runtime };
 }
 
 export async function handleRequest(request: Request) {
@@ -88,7 +86,7 @@ export async function handleRequest(request: Request) {
         await Promise.all(teams.map(async (team) => [team, await getTeamInfo(team).catch(() => null)])),
       );
 
-      return new Response(JSON.stringify(data), {
+      return new Response("{\"json\":" +JSON.stringify(data) + "}", {
         headers: {
           "content-type": "application/json",
         },

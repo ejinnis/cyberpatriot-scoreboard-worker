@@ -40,6 +40,7 @@ async function getTeamInfo(team: string) {
 
   const images = teamData.map((item: any) => ({
     name: item.image,
+    clean: item.image.split("_")[0].replace(/([^0-9])([0-9])/g, '$1 $2'),
     runtime: item.duration,
     issues: {
       found: item.found,
